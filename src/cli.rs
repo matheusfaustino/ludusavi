@@ -219,7 +219,8 @@ pub fn run(sub: Subcommand, no_manifest_update: bool, try_manifest_update: bool)
             let toggled_paths = config.backup.toggled_paths.clone();
             let toggled_registry = config.backup.toggled_registry.clone();
             let steam_shortcuts = SteamShortcuts::scan(&title_finder);
-            let wine_env = semantic::WineEnv::new(&config, &manifest, &roots, &launchers, &steam_shortcuts, &games);
+            let prefix_candidates =
+                semantic::PrefixCandidates::new(&config, &manifest, &roots, &launchers, &steam_shortcuts, &games);
 
             let cloud_sync = negatable_flag(
                 cloud_sync && !preview,
@@ -289,7 +290,7 @@ pub fn run(sub: Subcommand, no_manifest_update: bool, try_manifest_update: bool)
                 log::trace!("step {i} / {}: {name}", games.len());
                 let game = &manifest.0[name];
 
-                let wine_ctx = wine_env.for_game(name, &config);
+                let wine_ctx = prefix_candidates.for_game(name, &config);
                 let previous = layout.latest_backup(
                     name,
                     ScanKind::Backup,
@@ -515,7 +516,7 @@ pub fn run(sub: Subcommand, no_manifest_update: bool, try_manifest_update: bool)
                     return Err(Error::CliUnrecognizedGames { games });
                 }
             };
-            let wine_env = semantic::WineEnv::scan(&config, &manifest, &title_finder, &games);
+            let prefix_candidates = semantic::PrefixCandidates::scan(&config, &manifest, &title_finder, &games);
 
             let cloud_sync = negatable_flag(
                 cloud_sync && !preview,
@@ -574,7 +575,7 @@ pub fn run(sub: Subcommand, no_manifest_update: bool, try_manifest_update: bool)
                 log::trace!("step {i} / {}: {name}", games.len());
                 let mut layout = layout.game_layout(name);
 
-                let wine_ctx = wine_env.for_game(name, &config);
+                let wine_ctx = prefix_candidates.for_game(name, &config);
                 let scan_info = layout.scan_for_restoration(
                     name,
                     backup_id.as_ref().unwrap_or(&BackupId::Latest),

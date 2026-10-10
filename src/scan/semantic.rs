@@ -83,14 +83,15 @@ impl Wine {
     }
 }
 
-/// Wine prefixes detected from launchers and Steam,
-/// used when a game has no custom Wine prefix.
+/// Paths that may be a game's local Wine prefix, found via launchers and Steam.
+/// They are not checked here: `Wine::for_game` validates them and uses the first valid one
+/// when a game has no custom Wine prefix.
 #[derive(Clone, Debug, Default)]
-pub struct WineEnv {
+pub struct PrefixCandidates {
     prefixes: HashMap<String, Vec<StrictPath>>,
 }
 
-impl WineEnv {
+impl PrefixCandidates {
     pub fn new(
         config: &Config,
         manifest: &Manifest,
@@ -278,8 +279,8 @@ mod tests {
         config
     }
 
-    fn env(game: &str, prefix: &StrictPath) -> WineEnv {
-        WineEnv {
+    fn env(game: &str, prefix: &StrictPath) -> PrefixCandidates {
+        PrefixCandidates {
             prefixes: HashMap::from([(game.to_string(), vec![prefix.joined("pfx"), prefix.clone()])]),
         }
     }
@@ -297,7 +298,9 @@ mod tests {
         assert_eq!("steamuser", preferred.wine_user);
 
         assert!(env("game", &prefix).for_game("game", &Config::default()).is_none());
-        assert!(env("game", &prefix).for_game("other", &config()).is_none());
+        // On Windows, the context still exists for its known folders, but without a prefix.
+        let other = env("game", &prefix).for_game("other", &config());
+        assert!(other.is_none_or(|x| x.preferred_prefix.is_none()));
     }
 
     #[test]
@@ -357,7 +360,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_prefix(&tmp.path().join("steamapps/compatdata/4000000001/pfx"), "steamuser");
         let steam = StrictPath::from(tmp.path());
-        let wine_env = WineEnv::new(
+        let prefix_candidates = PrefixCandidates::new(
             &config(),
             &Manifest::default(),
             &[Root::new(steam.clone(), Store::Steam)],
@@ -371,7 +374,7 @@ mod tests {
             ),
             &["game".to_string()],
         );
-        let wine = wine_env.for_game("game", &config()).unwrap();
+        let wine = prefix_candidates.for_game("game", &config()).unwrap();
 
         // Backed up on another machine, where the shortcut had a different ID.
         let source = "/home/deck/.local/share/Steam/steamapps/compatdata/4000000002/pfx";
