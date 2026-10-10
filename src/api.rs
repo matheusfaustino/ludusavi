@@ -143,7 +143,14 @@ impl Ludusavi {
 
         let mut duplicate_detector = DuplicateDetector::default();
         let launchers = Launchers::scan(&roots, &self.manifest, &games, &self.title_finder, None);
-        let wine_env = semantic::WineEnv::new(&self.config, &roots, &launchers, &games);
+        let wine_env = semantic::WineEnv::new(
+            &self.config,
+            &self.manifest,
+            &roots,
+            &launchers,
+            &self.steam_shortcuts,
+            &games,
+        );
 
         let cloud_sync = self.config.cloud.synchronize
             && !finality.preview()
