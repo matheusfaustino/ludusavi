@@ -14,12 +14,10 @@ to translate between specific Windows and Linux paths,
 but this would generally require multiple redirects tailored to each game.
 In more complex cases, this is not practical or feasible.
 
-A subset of cross-OS transfer is under consideration for Windows and Wine prefixes,
-but there is no timeline for this.
+Ludusavi has experimental support for Windows and Wine prefixes, described below.
 You can follow this ticket for any future updates:
 https://github.com/mtkennerly/ludusavi/issues/194
 
-<!--
 ## Windows and Wine
 Ludusavi supports an experimental feature to translate between Windows paths and Wine prefixes.
 This currently only supports files, not registry values.
@@ -27,9 +25,20 @@ This currently only supports files, not registry values.
 As this is an experimental feature, you must enable it via the [config file](/docs/help/configuration-file.md),
 by setting `scan.redirectWine: true`.
 
-A game must have a "preferred" Wine prefix.
-For now, that means it must have a custom game entry,
-and the preferred prefix is simply the first one defined by the custom game entry.
+To restore into a Wine prefix, a game must have a "preferred" Wine prefix.
+Ludusavi uses the first of these that exists:
+
+* The first Wine prefix in the game's custom entry.
+* A prefix that Ludusavi detects from a launcher, such as Heroic or Lutris.
+  For Proton prefixes, Ludusavi prefers the `pfx` subfolder.
+* The Steam Proton prefix (`steamapps/compatdata/<id>/pfx`) for the game's Steam ID or non-Steam shortcut.
+  This lets you restore a non-Steam shortcut's saves on a computer where the shortcut has a different ID.
+
+If the original Wine prefix still exists, Ludusavi restores files to their original paths.
+
+If several files would be restored to the same path,
+Ludusavi restores only one of them and skips the others.
+It prefers files that weren't redirected, and then files from a Proton prefix.
 
 There are some exclusions where the automatic Wine redirects will not apply:
 
@@ -37,4 +46,11 @@ There are some exclusions where the automatic Wine redirects will not apply:
 * Wine prefix does not already exist
 * Wine prefix has multiple potential user folders
 * Windows path is on a complex UNC drive instead of a simple drive letter
--->
+
+### Back up on both systems
+Don't use the same backup folder on Windows and Linux.
+Each backup only includes the files that the current system can see,
+so a backup on one system drops the other system's files from the latest backup.
+
+Instead, give each system its own backup folder.
+To restore saves from the other system, run `ludusavi restore --path <other backup folder>`.
