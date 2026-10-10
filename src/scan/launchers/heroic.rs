@@ -9,7 +9,7 @@ use crate::{path::CommonPath, prelude::StrictPath};
 
 use crate::{
     resource::{config::root, manifest::Os},
-    scan::{TitleFinder, launchers::LauncherGame},
+    scan::{TitleFinder, launchers::LauncherGame, semantic::Prefix},
 };
 
 mod games_config {
@@ -132,13 +132,24 @@ fn find_prefix(
                         // This would usually be `{wine_prefix}/pfx`,
                         // but in at least one case in a Flatpak install,
                         // that was a broken link and the real prefix was just `wine_prefix`.
+                        // When `pfx` is valid, we use only that, since a `drive_c` beside it
+                        // would be left over from running the game without Proton.
+                        // If `pfx` is a link back to `wine_prefix` (e.g., with umu), then we keep `wine_prefix`,
+                        // since found files are recorded by their real path.
+                        let pfx = StrictPath::new(wine_prefix.clone()).joined("pfx");
+                        let pfx_is_link = std::path::Path::new(wine_prefix).join("pfx").is_symlink();
+                        let prefix = if !pfx_is_link && Prefix::validated(&pfx).is_some() {
+                            pfx
+                        } else {
+                            StrictPath::new(wine_prefix.clone())
+                        };
                         log::trace!(
-                            "Found Heroic Proton prefix for {} ({}), adding {}",
+                            "Found Heroic Proton prefix for {} ({}), adding {:?}",
                             game_name,
                             app_name,
-                            wine_prefix
+                            prefix
                         );
-                        Some(StrictPath::new(wine_prefix.clone()))
+                        Some(prefix)
                     }
 
                     _ => {
@@ -158,5 +169,69 @@ fn find_prefix(
             log::trace!("Failed to parse {:?}: {}", &games_config_path, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heroic_with_proton_prefix(heroic: &std::path::Path, prefix: &std::path::Path) {
+        std::fs::create_dir_all(heroic.join("GamesConfig")).unwrap();
+        std::fs::write(
+            heroic.join("GamesConfig/app.json"),
+            serde_json::json!({
+                "app": {
+                    "winePrefix": prefix.to_string_lossy(),
+                    "wineVersion": { "type": "proton" },
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn proton_prefix_uses_pfx_when_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        heroic_with_proton_prefix(tmp.path(), &prefix);
+        std::fs::create_dir_all(prefix.join("drive_c/users/deck")).unwrap();
+        std::fs::create_dir_all(prefix.join("pfx/drive_c/users/steamuser")).unwrap();
+        std::fs::File::create(prefix.join("pfx/system.reg")).unwrap();
+
+        assert_eq!(
+            Some(StrictPath::new(prefix.to_string_lossy().to_string()).joined("pfx")),
+            find_prefix(&StrictPath::from(tmp.path()), "game", None, "app"),
+        );
+    }
+
+    #[test]
+    fn proton_prefix_falls_back_without_valid_pfx() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        heroic_with_proton_prefix(tmp.path(), &prefix);
+        std::fs::create_dir_all(prefix.join("pfx")).unwrap();
+
+        assert_eq!(
+            Some(StrictPath::new(prefix.to_string_lossy().to_string())),
+            find_prefix(&StrictPath::from(tmp.path()), "game", None, "app"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proton_prefix_ignores_pfx_link_to_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        heroic_with_proton_prefix(tmp.path(), &prefix);
+        std::fs::create_dir_all(prefix.join("drive_c/users/steamuser")).unwrap();
+        std::fs::File::create(prefix.join("system.reg")).unwrap();
+        std::os::unix::fs::symlink(&prefix, prefix.join("pfx")).unwrap();
+
+        assert_eq!(
+            Some(StrictPath::new(prefix.to_string_lossy().to_string())),
+            find_prefix(&StrictPath::from(tmp.path()), "game", None, "app"),
+        );
     }
 }
