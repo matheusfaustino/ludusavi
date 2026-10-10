@@ -1,6 +1,12 @@
+use std::collections::HashMap;
+
 use crate::{
     api::{Config, StrictPath},
-    scan::layout::{BackupSemantics, SemanticDirKind},
+    resource::{config::Root, manifest::Manifest},
+    scan::{
+        Launchers, TitleFinder,
+        layout::{BackupSemantics, SemanticDirKind},
+    },
 };
 
 pub use self::{convert::KnownFolders, prefix::Prefix};
@@ -39,12 +45,13 @@ pub struct Wine {
 impl Wine {
     /// Build a context from the current game's config and system state.
     /// Returns None if redirect_wine is disabled or no usable context exists.
-    pub fn for_game(game_name: &str, config: &Config) -> Option<Self> {
+    fn for_game(game_name: &str, config: &Config, detected_prefixes: &[StrictPath]) -> Option<Self> {
         if !config.scan.redirect_wine {
             return None;
         }
 
-        // Find the first valid wine_prefix from a matching custom game.
+        // Find the first valid wine_prefix from a matching custom game,
+        // or else from the locally detected prefixes.
         let preferred_prefix = config
             .custom_games
             .iter()
@@ -54,7 +61,8 @@ impl Wine {
                     .iter()
                     .filter(|wp| !wp.trim().is_empty())
                     .find_map(|wp| Prefix::validated(&StrictPath::new(wp)))
-            });
+            })
+            .or_else(|| detected_prefixes.iter().find_map(Prefix::validated));
 
         // On Windows, populate known_folders so that Wine→Windows restore can
         // convert semantic paths to physical paths.
@@ -69,6 +77,49 @@ impl Wine {
         } else {
             None
         }
+    }
+}
+
+/// Wine prefixes detected from launchers, used when a game has no custom Wine prefix.
+#[derive(Clone, Debug, Default)]
+pub struct WineEnv {
+    prefixes: HashMap<String, Vec<StrictPath>>,
+}
+
+impl WineEnv {
+    pub fn new(config: &Config, roots: &[Root], launchers: &Launchers, games: &[String]) -> Self {
+        let mut prefixes = HashMap::<String, Vec<StrictPath>>::new();
+
+        if !config.scan.redirect_wine {
+            return Self { prefixes };
+        }
+
+        for game in games {
+            for root in roots {
+                for prefix in launchers.get_game(root, game).filter_map(|x| x.prefix.as_ref()) {
+                    let entry = prefixes.entry(game.clone()).or_default();
+                    entry.push(prefix.joined("pfx"));
+                    entry.push(prefix.clone());
+                }
+            }
+        }
+
+        Self { prefixes }
+    }
+
+    pub fn scan(config: &Config, manifest: &Manifest, title_finder: &TitleFinder, games: &[String]) -> Self {
+        if !config.scan.redirect_wine {
+            return Self::default();
+        }
+
+        let roots = config.expanded_roots();
+        let launchers = Launchers::scan(&roots, manifest, games, title_finder, None);
+        Self::new(config, &roots, &launchers, games)
+    }
+
+    pub fn for_game(&self, game_name: &str, config: &Config) -> Option<Wine> {
+        let detected = self.prefixes.get(game_name).map(Vec::as_slice).unwrap_or_default();
+        Wine::for_game(game_name, config, detected)
     }
 }
 
@@ -106,10 +157,14 @@ pub fn generate_restore_redirect(
             return materialize_to_windows(&semantic, kf);
         }
 
-        // Wine backup → Wine restore (same or different prefix):
+        // Wine backup → Wine restore (different prefix):
         // Use semantic conversion to handle username changes correctly.
         if let Some(prefix) = &context.preferred_prefix {
             let prefix_sp = StrictPath::new(prefix_path.clone());
+            // The original prefix still exists, so keep the original path.
+            if Prefix::validated(&prefix_sp).is_some() {
+                return None;
+            }
             let wine_user = prefix::detect_wine_user_from_raw_path(stored_raw, prefix_path)?;
             if let Some(semantic) = convert::wine_physical_to_semantic(stored_path, &prefix_sp, &wine_user)
                 .and_then(|s| materialize_to_wine(&s, prefix))
@@ -180,4 +235,92 @@ fn materialize_to_wine(semantic: &Path, prefix: &Prefix) -> Option<StrictPath> {
         semantic.tail
     );
     Some(StrictPath::new(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_prefix(path: &std::path::Path, user: &str) {
+        std::fs::create_dir_all(path.join("drive_c/users").join(user)).unwrap();
+        std::fs::File::create(path.join("system.reg")).unwrap();
+    }
+
+    fn config() -> Config {
+        let mut config = Config::default();
+        config.scan.redirect_wine = true;
+        config
+    }
+
+    fn env(game: &str, prefix: &StrictPath) -> WineEnv {
+        WineEnv {
+            prefixes: HashMap::from([(game.to_string(), vec![prefix.joined("pfx"), prefix.clone()])]),
+        }
+    }
+
+    #[test]
+    fn detected_prefix_prefers_pfx() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_prefix(tmp.path(), "deck");
+        make_prefix(&tmp.path().join("pfx"), "steamuser");
+        let prefix = StrictPath::from(tmp.path());
+
+        let wine = env("game", &prefix).for_game("game", &config()).unwrap();
+        let preferred = wine.preferred_prefix.unwrap();
+        assert_eq!(prefix.joined("pfx"), preferred.path);
+        assert_eq!("steamuser", preferred.wine_user);
+
+        assert!(env("game", &prefix).for_game("game", &Config::default()).is_none());
+        assert!(env("game", &prefix).for_game("other", &config()).is_none());
+    }
+
+    #[test]
+    fn restores_windows_path_into_detected_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_prefix(&tmp.path().join("pfx"), "steamuser");
+        let prefix = StrictPath::from(tmp.path());
+        let wine = env("game", &prefix).for_game("game", &config()).unwrap();
+
+        assert_eq!(
+            Some(StrictPath::new(format!(
+                "{}/drive_c/users/steamuser/AppData/Roaming/game/save.dat",
+                prefix.joined("pfx").raw()
+            ))),
+            generate_restore_redirect(
+                &StrictPath::new("C:/Users/Alice/AppData/Roaming/game/save.dat"),
+                &BackupSemantics::default(),
+                &wine,
+            )
+        );
+    }
+
+    #[test]
+    fn keeps_original_path_when_original_prefix_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_prefix(tmp.path(), "deck");
+        make_prefix(&tmp.path().join("pfx"), "steamuser");
+        let prefix = StrictPath::from(tmp.path());
+        let wine = env("game", &prefix).for_game("game", &config()).unwrap();
+
+        let semantics = BackupSemantics {
+            directories: [(
+                prefix.render(),
+                crate::scan::layout::DirectorySemantics {
+                    kind: SemanticDirKind::Wine,
+                },
+            )]
+            .into(),
+        };
+        assert_eq!(
+            None,
+            generate_restore_redirect(
+                &StrictPath::new(format!(
+                    "{}/drive_c/users/deck/AppData/Roaming/game/save.dat",
+                    prefix.render()
+                )),
+                &semantics,
+                &wine,
+            )
+        );
+    }
 }

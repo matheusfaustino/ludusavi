@@ -18,6 +18,7 @@ use crate::{
         BackupInfo, Launchers, ScanInfo, ScanKind, SteamShortcuts, game_filter,
         layout::{Backup, BackupLayout, GameLayout},
         registry::RegistryItem,
+        semantic::WineEnv,
     },
 };
 
@@ -79,6 +80,7 @@ pub enum RestorePhase {
     RegisterCommands {
         restorables: Vec<String>,
         layout: BackupLayout,
+        wine_env: WineEnv,
     },
     GameScanned {
         scan_info: Option<ScanInfo>,

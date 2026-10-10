@@ -472,6 +472,7 @@ impl App {
                 let config = std::sync::Arc::new(self.config.clone());
                 let roots = std::sync::Arc::new(config.expanded_roots());
                 let layout = std::sync::Arc::new(*layout);
+                let wine_env = std::sync::Arc::new(semantic::WineEnv::new(&config, &roots, &launchers, &subjects));
                 let launchers = std::sync::Arc::new(launchers);
                 let filter = std::sync::Arc::new(self.config.backup.filter.clone());
                 let steam_shortcuts = std::sync::Arc::new(steam);
@@ -486,6 +487,7 @@ impl App {
                     let config = config.clone();
                     let roots = roots.clone();
                     let launchers = launchers.clone();
+                    let wine_env = wine_env.clone();
                     let layout = layout.clone();
                     let filter = filter.clone();
                     let steam_shortcuts = steam_shortcuts.clone();
@@ -501,7 +503,7 @@ impl App {
                                     return (None, None);
                                 }
 
-                                let wine_ctx = semantic::Wine::for_game(&key, &config);
+                                let wine_ctx = wine_env.for_game(&key, &config);
                                 let previous = layout.latest_backup(
                                     &key,
                                     SCAN_KIND,
@@ -798,6 +800,11 @@ impl App {
             }
             RestorePhase::Load => {
                 let restore_path = self.config.restore.path.clone();
+                let wine_env_input = self
+                    .config
+                    .scan
+                    .redirect_wine
+                    .then(|| (self.config.clone(), self.manifest.extended.clone()));
 
                 self.progress.start();
 
@@ -805,16 +812,27 @@ impl App {
                     async move {
                         let layout = BackupLayout::new(restore_path);
                         let restorables = layout.restorable_games();
-                        (layout, restorables)
+                        let wine_env = wine_env_input
+                            .map(|(config, manifest)| {
+                                let title_finder = TitleFinder::new(&config, &manifest, layout.restorable_game_set());
+                                semantic::WineEnv::scan(&config, &manifest, &title_finder, &restorables)
+                            })
+                            .unwrap_or_default();
+                        (layout, restorables, wine_env)
                     },
-                    move |(layout, restorables)| {
-                        Message::Restore(RestorePhase::RegisterCommands { layout, restorables })
+                    move |(layout, restorables, wine_env)| {
+                        Message::Restore(RestorePhase::RegisterCommands {
+                            layout,
+                            restorables,
+                            wine_env,
+                        })
                     },
                 )
             }
             RestorePhase::RegisterCommands {
                 mut restorables,
                 layout,
+                wine_env,
             } => {
                 log::info!("beginning restore with {} steps", restorables.len());
                 let preview = self.operation.preview();
@@ -856,10 +874,12 @@ impl App {
 
                 let config = std::sync::Arc::new(self.config.clone());
                 let layout = std::sync::Arc::new(layout);
+                let wine_env = std::sync::Arc::new(wine_env);
 
                 for name in restorables {
                     let config = config.clone();
                     let layout = layout.clone();
+                    let wine_env = wine_env.clone();
                     let cancel_flag = self.operation_should_cancel.clone();
                     let backup_id = self.backups_to_restore.get(&name).cloned().unwrap_or(BackupId::Latest);
                     self.operation_steps.push(OperationStep {
@@ -872,7 +892,7 @@ impl App {
                                     return (None, None, layout);
                                 }
 
-                                let wine_ctx = semantic::Wine::for_game(&name, &config);
+                                let wine_ctx = wine_env.for_game(&name, &config);
                                 let scan_info = layout.scan_for_restoration(
                                     &name,
                                     &backup_id,
